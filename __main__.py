@@ -36,7 +36,7 @@ check_version('qtutils', '2.0.0', '3.0.0')
 check_version('zprocess', '1.1.7', '3.0')
 
 import zprocess.locking
-from zprocess import ZMQServer
+from zprocess import ZMQServer, zmq_get
 
 from labscript_utils.labconfig import LabConfig, config_prefix
 from labscript_utils.setup_logging import setup_logging
@@ -156,6 +156,22 @@ def scientific_notation(x, sigfigs=4, mode='eng'):
 
 
 class WebServer(ZMQServer):
+    def __init__(self, *args, **kwargs):
+        super(WebServer, self).__init__(*args, **kwargs)
+        self.storage = {}
+
+    def remove_data_by_filepath(self, filepath, dic=None):
+        if dic is None:
+            dic = self.storage
+
+        # find top level keys
+        if filepath in dic:
+            del dic[filepath]
+
+        # recursivly search the rest
+        for k in dic.keys():
+            if isinstance(dic[k], dict):
+                self.remove_data_by_filepath(filepath, dic[k])
 
     def handler(self, request_data):
         logger.info('WebServer request: %s' % str(request_data))
@@ -179,8 +195,45 @@ class WebServer(ZMQServer):
                     raise AssertionError(str(type(h5_filepath)) + ' is not str or unicode')
                 app.filebox.incoming_queue.put(h5_filepath)
                 return 'added successfully'
+        elif isinstance(request_data, tuple):
+            command, keys, data = request_data
+
+            storage = self.storage
+            if len(keys) > 1:
+                for key in keys[:-1]:
+                    if key not in storage:
+                        storage[key] = {}
+                    storage = storage[key]
+
+            if command == "get":
+                try:
+                    return storage[keys[-1]]
+                except KeyError:
+                    return None
+                except IndexError:
+                    return storage
+
+            elif command == "set":
+                storage[keys[-1]] = data
+                return True
+
+            elif command == "del":
+                try:
+                    del storage[keys[-1]]
+                except KeyError and IndexError:
+                    return False
+                return True
+
+            elif command == "remove_shot":
+                remove_data_by_filepath(data)
+                return True
+
+            # elif command == "clear":
+            #     del self.storage
+            #     self.storage = {}
+
         return ("error: operation not supported. Recognised requests are:\n "
-                "'get dataframe'\n 'hello'\n {'filepath': <some_h5_filepath>}")
+                "'get dataframe'\n 'hello'\n {'filepath': <some_h5_filepath>} \n (<get/set/del/clear>, <tuple_of_storage_keys>, <data_to_store>)")
 
 
 class LyseMainWindow(QtWidgets.QMainWindow):
@@ -1213,9 +1266,12 @@ class DataFrameModel(QtCore.QObject):
         # Remove from DataFrame first:
         self.dataframe = self.dataframe.drop(index.row() for index in selected_indexes)
         self.dataframe.index = pandas.Index(range(len(self.dataframe)))
-        # Delete one at a time from Qt model:
+        # Delete one at a time from Qt model
+        # also delete any cached data for each shot from the web server's cache
         for name_item in selected_name_items:
             row = name_item.row()
+            filepath = self._model.item(row, self.COL_FILEPATH).text()
+            zmq_get(app.port, 'localhost', ('remove_shot', [], filepath), 5)
             self._model.removeRow(row)
         self.renumber_rows()
 
