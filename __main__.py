@@ -36,7 +36,7 @@ check_version('qtutils', '2.0.0', '3.0.0')
 check_version('zprocess', '1.1.7', '3.0')
 
 import zprocess.locking
-from zprocess import ZMQServer
+from zprocess import ZMQServer, zmq_get, TimeoutError
 
 from labscript_utils.labconfig import LabConfig, config_prefix
 from labscript_utils.setup_logging import setup_logging
@@ -46,6 +46,7 @@ import labscript_utils.shared_drive as shared_drive
 from lyse.dataframe_utilities import (concat_with_padding,
                                       get_dataframe_from_shot,
                                       replace_with_padding)
+from lyse.cache_utilities import CacheServer, cache_port, caching_enabled, cache_timeout
 
 from qtutils.qt import QtCore, QtGui, QtWidgets
 from qtutils.qt.QtCore import pyqtSignal as Signal
@@ -1230,10 +1231,20 @@ class DataFrameModel(QtCore.QObject):
         # Remove from DataFrame first:
         self.dataframe = self.dataframe.drop(index.row() for index in selected_indexes)
         self.dataframe.index = pandas.Index(range(len(self.dataframe)))
-        # Delete one at a time from Qt model:
+        # Delete one at a time from Qt model
+        # also delete any cached data for each shot from the web server's cache
+        filepaths = []
         for name_item in selected_name_items:
             row = name_item.row()
+            filepaths.append(self._model.item(row, self.COL_FILEPATH).text())
             self._model.removeRow(row)
+
+        if caching_enabled:
+            try:
+                zmq_get(cache_port, 'localhost', ('remove_shots', [], filepaths), cache_timeout)
+            except TimeoutError:
+                pass
+
         self.renumber_rows()
 
     def mark_selection_not_done(self):
@@ -2167,6 +2178,7 @@ if __name__ == "__main__":
 
     # Start the web server:
     server = WebServer(app.port)
+    cache_server = CacheServer(cache_port)
 
     # Let the interpreter run every 500ms so it sees Ctrl-C interrupts:
     timer = QtCore.QTimer()
@@ -2183,3 +2195,4 @@ if __name__ == "__main__":
     
     qapplication.exec_()
     server.shutdown()
+    cache_server.shutdown()
